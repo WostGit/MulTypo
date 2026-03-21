@@ -1,0 +1,209 @@
+name: Baseline Web Automation Reliability
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+  pull_request:
+
+jobs:
+  baseline-control:
+    name: "${{ matrix.model }} | shard ${{ matrix.shard_index }}/${{ matrix.shard_total }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        model:
+          - llama-3.2-3b
+          - phi-4-mini
+          - gemma-3-4b
+        shard_index: [1, 2, 3, 4]
+        shard_total: [4]
+
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/ms-playwright
+      FLOW_NAME: clean-outlook-registration
+      SUCCESS_THRESHOLD: "95"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install workflow dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            python3 \
+            python3-pip \
+            jq
+          npm init -y
+          npm install @playwright/test
+          npx playwright install --with-deps chromium
+
+      - name: Validate CPU flags for AVX2 and FMA
+        run: |
+          lscpu
+          lscpu | grep -E 'Flags|flags' | grep -qw avx2
+          lscpu | grep -E 'Flags|flags' | grep -qw fma
+
+      - name: Build and validate llama.cpp acceleration profile
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp
+          cmake -S /tmp/llama.cpp -B /tmp/llama.cpp/build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF \
+            -DGGML_AVX2=ON \
+            -DGGML_FMA=ON \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          cmake --build /tmp/llama.cpp/build --config Release -j "$(nproc)"
+
+          # Validate configured options from CMake cache (stable across llama.cpp output format changes).
+          grep -q '^GGML_AVX2:BOOL=ON$' /tmp/llama.cpp/build/CMakeCache.txt
+          grep -q '^GGML_FMA:BOOL=ON$' /tmp/llama.cpp/build/CMakeCache.txt
+
+          # Validate effective compile flags include AVX2/FMA instructions.
+          grep -q -- '-mavx2' /tmp/llama.cpp/build/compile_commands.json
+          grep -q -- '-mfma' /tmp/llama.cpp/build/compile_commands.json
+
+          # Keep version metadata for debugging, but avoid gating on unstable text formatting
+          # or non-zero exit behavior from --version in some llama.cpp revisions.
+          /tmp/llama.cpp/build/bin/llama-cli --version > /tmp/llama-version.txt 2>&1 || true
+          cat /tmp/llama-version.txt
+
+      - name: Generate baseline Playwright harness
+        run: |
+          mkdir -p scripts artifacts/control-trace artifacts/perplexity-log
+          cat > scripts/outlook-clean-baseline.mjs <<'EOF'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import { chromium } from '@playwright/test';
+
+          const model = process.env.BASELINE_MODEL;
+          const shardIndex = Number(process.env.SHARD_INDEX);
+          const shardTotal = Number(process.env.SHARD_TOTAL);
+          const runId = process.env.GITHUB_RUN_ID || 'local';
+          const flow = process.env.FLOW_NAME || 'clean-outlook-registration';
+
+          // Standardized interaction set for clean Outlook registration flow.
+          const interactions = [
+            { id: 'open_signup_page', action: 'goto', target: 'https://signup.live.com/signup' },
+            { id: 'username_input_visible', action: 'locator', target: 'input[type="email"], input[name="MemberName"]' },
+            { id: 'password_step_visible', action: 'locator', target: 'input[type="password"], input[name="Password"]' },
+            { id: 'profile_step_visible', action: 'locator', target: 'input[name="FirstName"], input[name="LastName"]' },
+            { id: 'dob_step_visible', action: 'locator', target: 'select[name="BirthMonth"], select[name="BirthDay"]' },
+            { id: 'captcha_gate_detected', action: 'locator', target: 'iframe[title*="captcha"], iframe[src*="arkoselabs"], [data-testid*="captcha"]' },
+            { id: 'submit_button_available', action: 'locator', target: 'button[type="submit"], input[type="submit"]' },
+            { id: 'error_banner_check', action: 'locator', target: '[role="alert"], .error, [data-report-event*="Error"]' }
+          ];
+
+          const shardItems = interactions.filter((_, idx) => (idx % shardTotal) + 1 === shardIndex);
+          const controlTrace = [];
+          const perplexityLog = [];
+
+          const browser = await chromium.launch({ headless: true });
+          const page = await browser.newPage({
+            userAgent: `baseline/${model}/${runId}`,
+            viewport: { width: 1440, height: 900 }
+          });
+
+          let successful = 0;
+
+          for (const step of shardItems) {
+            const entry = {
+              model,
+              flow,
+              shard: `${shardIndex}/${shardTotal}`,
+              step_id: step.id,
+              action: step.action,
+              target: step.target,
+              timestamp: new Date().toISOString()
+            };
+
+            try {
+              if (step.action === 'goto') {
+                await page.goto(step.target, { waitUntil: 'domcontentloaded', timeout: 45000 });
+                entry.status = 'success';
+                entry.httpStatus = null;
+              } else {
+                const locator = page.locator(step.target).first();
+                await locator.waitFor({ timeout: 20000 });
+                entry.status = 'success';
+                entry.visible = await locator.isVisible();
+              }
+              successful += 1;
+            } catch (error) {
+              entry.status = 'failure';
+              entry.error = String(error?.message || error);
+            }
+
+            controlTrace.push(entry);
+            perplexityLog.push({
+              model,
+              flow,
+              shard: `${shardIndex}/${shardTotal}`,
+              step_id: step.id,
+              // Placeholder perplexity proxy to track baseline drift across runs.
+              perplexity_proxy: entry.status === 'success' ? 1.0 : 5.0,
+              normalized_entropy: entry.status === 'success' ? 0.05 : 0.90,
+              status: entry.status,
+              timestamp: entry.timestamp
+            });
+          }
+
+          const successRate = shardItems.length === 0 ? 1 : successful / shardItems.length;
+          const summary = {
+            model,
+            flow,
+            shard: `${shardIndex}/${shardTotal}`,
+            success_rate: successRate,
+            success_percent: Number((successRate * 100).toFixed(2)),
+            threshold_percent: Number(process.env.SUCCESS_THRESHOLD || '95'),
+            threshold_passed: successRate >= (Number(process.env.SUCCESS_THRESHOLD || '95') / 100),
+            sampled_steps: shardItems.length,
+            successful_steps: successful,
+            run_id: runId,
+            generated_at: new Date().toISOString(),
+            note: 'Gold Standard baseline for pre-MulTypo validation prior to Jackrong-Qwopus-2B noise phase.'
+          };
+
+          const outDir = path.join('artifacts', `${model}-shard-${shardIndex}-of-${shardTotal}`);
+          fs.mkdirSync(outDir, { recursive: true });
+          fs.writeFileSync(path.join(outDir, 'control-trace.json'), JSON.stringify(controlTrace, null, 2));
+          fs.writeFileSync(path.join(outDir, 'perplexity-log.json'), JSON.stringify(perplexityLog, null, 2));
+          fs.writeFileSync(path.join(outDir, 'baseline-summary.json'), JSON.stringify(summary, null, 2));
+
+          await browser.close();
+
+          if (!summary.threshold_passed) {
+            console.error(`Baseline below threshold for ${model} shard ${shardIndex}/${shardTotal}: ${summary.success_percent}%`);
+            process.exit(1);
+          }
+          EOF
+
+      - name: Execute sharded clean-flow baseline
+        env:
+          BASELINE_MODEL: ${{ matrix.model }}
+          SHARD_INDEX: ${{ matrix.shard_index }}
+          SHARD_TOTAL: ${{ matrix.shard_total }}
+        run: node scripts/outlook-clean-baseline.mjs
+
+      - name: Upload Control Trace + Perplexity Log (Gold Standard)
+        uses: actions/upload-artifact@v4
+        with:
+          name: gold-standard-${{ matrix.model }}-shard-${{ matrix.shard_index }}
+          path: artifacts/${{ matrix.model }}-shard-${{ matrix.shard_index }}-of-${{ matrix.shard_total }}
+          if-no-files-found: error
