@@ -21,8 +21,8 @@ jobs:
           - llama-3.2-3b
           - phi-4-mini
           - gemma-3-4b
-        shard_index: [1, 2, 3, 4]
-        shard_total: [4]
+        shard_index: [1]
+        shard_total: [1]
 
     env:
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/ms-playwright
@@ -102,13 +102,13 @@ jobs:
 
           // Standardized interaction set for clean Outlook registration flow.
           const interactions = [
-            { id: 'open_signup_page', action: 'goto', target: 'https://signup.live.com/signup', required: false },
+            { id: 'open_signup_page', action: 'goto', target: 'https://signup.live.com/signup', required: true },
             { id: 'username_input_visible', action: 'locator', target: 'input[type="email"], input[name="MemberName"]', required: true },
+            { id: 'submit_button_available', action: 'locator', target: 'button[type="submit"], input[type="submit"]', required: true },
             { id: 'password_step_visible', action: 'locator', target: 'input[type="password"], input[name="Password"]', required: false },
             { id: 'profile_step_visible', action: 'locator', target: 'input[name="FirstName"], input[name="LastName"]', required: false },
             { id: 'dob_step_visible', action: 'locator', target: 'select[name="BirthMonth"], select[name="BirthDay"]', required: false },
             { id: 'captcha_gate_detected', action: 'locator', target: 'iframe[title*="captcha"], iframe[src*="arkoselabs"], [data-testid*="captcha"]', required: false },
-            { id: 'submit_button_available', action: 'locator', target: 'button[type="submit"], input[type="submit"]', required: false },
             { id: 'error_banner_check', action: 'locator', target: '[role="alert"], .error, [data-report-event*="Error"]', required: false }
           ];
 
@@ -146,8 +146,29 @@ jobs:
                 entry.status = 'success';
                 entry.httpStatus = null;
               } else {
+                if (step.id === 'username_input_visible') {
+                  await page.waitForLoadState('domcontentloaded', { timeout: 45000 });
+                  await page.waitForTimeout(3000);
+                  entry.currentUrl = page.url();
+                  entry.pageTitle = await page.title().catch(() => null);
+                  const visibleInputs = await page.locator('input').evaluateAll((els) => els
+                    .filter((el) => {
+                      const style = window.getComputedStyle(el);
+                      const rect = el.getBoundingClientRect();
+                      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                    })
+                    .slice(0, 12)
+                    .map((el) => ({
+                      name: el.getAttribute('name'),
+                      type: el.getAttribute('type'),
+                      id: el.getAttribute('id'),
+                      placeholder: el.getAttribute('placeholder'),
+                    }))
+                  ).catch(() => []);
+                  entry.visibleInputsBeforeWait = visibleInputs;
+                }
                 const locator = page.locator(step.target).first();
-                await locator.waitFor({ timeout: 20000 });
+                await locator.waitFor({ timeout: 30000 });
                 entry.status = 'success';
                 entry.visible = await locator.isVisible();
               }
