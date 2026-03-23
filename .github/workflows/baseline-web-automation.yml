@@ -27,7 +27,7 @@ jobs:
     env:
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/ms-playwright
       FLOW_NAME: clean-outlook-registration
-      SUCCESS_THRESHOLD: "0"
+      SUCCESS_THRESHOLD: "50"
 
     steps:
       - name: Checkout repository
@@ -179,7 +179,7 @@ jobs:
             });
           }
 
-          const successRate = requiredSteps === 0 ? 1 : successful / requiredSteps;
+          const successRate = requiredSteps === 0 ? 0 : successful / requiredSteps;
           const summary = {
             model,
             flow,
@@ -204,8 +204,17 @@ jobs:
 
           await browser.close();
 
+          console.log('===== BASELINE CONTROL TRACE =====');
+          console.log(JSON.stringify(controlTrace, null, 2));
+          console.log('===== BASELINE SUMMARY =====');
+          console.log(JSON.stringify(summary, null, 2));
+          if (summary.required_steps === 0) {
+            console.error(`No required validation steps were assigned to ${model} shard ${shardIndex}/${shardTotal}; refusing to count empty shard as success.`);
+            process.exit(2);
+          }
           if (!summary.threshold_passed) {
-            console.warn(`Baseline below threshold for ${model} shard ${shardIndex}/${shardTotal}: ${summary.success_percent}%`);
+            console.error(`Baseline below threshold for ${model} shard ${shardIndex}/${shardTotal}: ${summary.success_percent}%`);
+            process.exit(1);
           }
 
           console.log(`Baseline summary for ${model} shard ${shardIndex}/${shardTotal}: ${summary.success_percent}% success (${summary.successful_required_steps}/${summary.required_steps} required steps)`);
