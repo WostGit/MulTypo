@@ -27,7 +27,7 @@ jobs:
     env:
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/ms-playwright
       FLOW_NAME: clean-outlook-registration
-      SUCCESS_THRESHOLD: "50"
+      SUCCESS_THRESHOLD: "95"
 
     steps:
       - name: Checkout repository
@@ -103,7 +103,7 @@ jobs:
           // Standardized interaction set for clean Outlook registration flow.
           const interactions = [
             { id: 'open_signup_page', action: 'goto', target: 'https://signup.live.com/signup', required: true },
-            { id: 'username_input_visible', action: 'locator', target: 'input[type="email"], input[name="MemberName"]', required: true },
+            { id: 'username_input_visible', action: 'locator', target: 'input#usernameInput, input[name="MemberName"], input[aria-label="New email"], input[placeholder="someone@example.com"], input[type="email"]', required: true },
             { id: 'submit_button_available', action: 'locator', target: 'button[type="submit"], input[type="submit"]', required: true },
             { id: 'password_step_visible', action: 'locator', target: 'input[type="password"], input[name="Password"]', required: false },
             { id: 'profile_step_visible', action: 'locator', target: 'input[name="FirstName"], input[name="LastName"]', required: false },
